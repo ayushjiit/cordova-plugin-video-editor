@@ -6,6 +6,7 @@ import java.net.URLDecoder;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.ArrayList;
 
 import android.graphics.Bitmap;
 import org.apache.cordova.CordovaPlugin;
@@ -30,7 +31,20 @@ import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.util.Log;
 
+import java.nio.channels.WritableByteChannel;
+import java.util.Arrays;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.regex.Pattern;
+import java.util.Scanner;
+
 import net.ypresto.androidtranscoder.MediaTranscoder;
+
+import com.github.hiteshsondhi88.libffmpeg.ExecuteBinaryResponseHandler;
+import com.github.hiteshsondhi88.libffmpeg.FFmpeg;
+import com.github.hiteshsondhi88.libffmpeg.LoadBinaryResponseHandler;
+import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegCommandAlreadyRunningException;
+import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegNotSupportedException;
 
 /**
  * VideoEditor plugin for Android
@@ -65,6 +79,13 @@ public class VideoEditor extends CordovaPlugin {
         } else if (action.equals("getVideoInfo")) {
             try {
                 this.getVideoInfo(args);
+            } catch (IOException e) {
+                callback.error(e.toString());
+            }
+            return true;
+        } else if (action.equals("trim")) {
+            try {
+                this.trim(args);
             } catch (IOException e) {
                 callback.error(e.toString());
             }
@@ -363,8 +384,9 @@ public class VideoEditor extends CordovaPlugin {
                     outStream = new FileOutputStream(outputFile);
                     bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outStream);
 
-                    callback.success(outputFilePath);
-
+                    PluginResult progressResult = new PluginResult(PluginResult.Status.OK, outputFilePath);
+                    progressResult.setKeepCallback(true);
+                    callback.sendPluginResult(progressResult);
                 } catch (Throwable e) {
                     if (outStream != null) {
                         try {
@@ -375,8 +397,10 @@ public class VideoEditor extends CordovaPlugin {
                     }
 
                     Log.d(TAG, "exception on thumbnail creation", e);
-                    callback.error(e.toString());
 
+                    PluginResult progressResult = new PluginResult(PluginResult.Status.ERROR, e.toString());
+                    progressResult.setKeepCallback(true);
+                    callback.sendPluginResult(progressResult);
                 }
 
             }
@@ -462,7 +486,204 @@ public class VideoEditor extends CordovaPlugin {
 
         callback.success(response);
     }
+    /**
+     * getFileExt
+     *
+     * Gets the file extension from a filename
+     *
+     * @param String filename
+     * @return String
+     */
+    private String getFileExt(String filename){
+        try {
+            return filename.substring(filename.lastIndexOf("."));
 
+        }
+        catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * getTempDir
+     *
+     * Make a temp directory for storing intermediate files.
+     * Named after file type, eg 'mp4', 'ts')
+     *
+     * @param Context appContext
+     * @param String ext
+     * @return File
+     */
+    private File getTempDir(Context appContext, String ext){
+        final File tempDir = new File(appContext.getCacheDir(), ext.substring(1));
+        if(!tempDir.exists()){
+            if (!tempDir.mkdirs()) {
+                callback.error("Can't access or make temporary cache directory");
+                return null;
+            }
+        }
+        return tempDir;
+    }
+
+	/**
+     * trim
+     *
+     * Performs a fast-trim operation on an input clip.
+     *
+     * ARGUMENTS
+     * =========
+     *
+     * fileUri      - path to input video
+     * trimStart      - time to start trimming
+     * trimEnd        - time to end trimming
+     * outputFileName - output file name
+     *
+     * RESPONSE
+     * ========
+     *
+     * outputFilePath - path to output file
+     *
+     * @param JSONArray args
+     * @return void
+     */
+    public void trim(JSONArray args) throws JSONException, IOException {
+        Log.d(TAG, "trim firing");
+        JSONObject options = args.optJSONObject(0);
+
+        double startMs =  options.optDouble("trimStart", 0);
+        double endMs =  options.optDouble("trimEnd", 0);
+
+        String fileUri = options.getString("fileUri");
+        if (!fileUri.startsWith("file:/")) {
+            fileUri = "file:/" + fileUri;
+        }
+
+        File inFile = this.resolveLocalFileSystemURI(fileUri);
+        if (!inFile.exists()) {
+            Log.d(TAG, "input file does not exist");
+            callback.error("input video does not exist.");
+            return;
+        }
+
+        // inputFilePathAbsolute
+        final String inputFilePath = options.getString("fileUri").replace("file:/", "");
+        final File inputFile = new File(inputFilePath);
+        final String inputFilePathAbsolute = inputFile.getAbsolutePath();
+
+        // outputFileName
+        final String outputFileExt = this.getFileExt(inputFilePath);
+        final String outputFileName = options.optString("outputFileName", new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ENGLISH).format(new Date()));
+
+        // temporary directory
+        final Context appContext = cordova.getActivity().getApplicationContext();
+        final File tempDir = this.getTempDir(appContext, outputFileExt);
+
+        // external directory
+        // File moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
+
+        File outputFilePath = new File(tempDir, outputFileName + outputFileExt);
+        final String filePath = outputFilePath.getAbsolutePath();
+
+        Log.d(TAG, "startTrim: src: " + inputFilePathAbsolute);
+        Log.d(TAG, "startTrim: dest: " + filePath);
+        Log.d(TAG, "startTrim: startMs: " + startMs);
+        Log.d(TAG, "startTrim: endMs: " + endMs);
+
+        double totalDur = endMs - startMs;
+
+        String[] complexCommand = {"-ss", "" + startMs, "-y", "-i", inputFilePathAbsolute, "-t", "" + totalDur, "-crf", "27", "-preset", "ultrafast", "-vcodec", "libx264", "-ac", "2", filePath};
+        execFFmpegBinary(complexCommand, filePath, totalDur);
+    }
+
+     private void execFFmpegBinary(final String[] command, final String outputFilePathAbsolute, final double totalDur) {
+       final Context appContext = cordova.getActivity().getApplicationContext();
+       FFmpeg ffmpeg = FFmpeg.getInstance(appContext);
+
+       try {
+         ffmpeg.loadBinary(new LoadBinaryResponseHandler() {
+           @Override
+           public void onFailure() {
+             Log.d(TAG, "ffmpeg : loading failed");
+             callback.error("binary load falied");
+           }
+
+           @Override
+           public void onSuccess() {
+             Log.d(TAG, "ffmpeg : correct Loaded");
+
+             try {
+                 ffmpeg.execute(command, new ExecuteBinaryResponseHandler() {
+                     double currStatus = 0.0;
+
+                     @Override
+                     public void onFailure(String s) {
+                         Log.d(TAG, "FAILED with output : " + s);
+                         callback.error(s);
+                     }
+
+                     @Override
+                     public void onSuccess(String s) {
+                         Log.d(TAG, "SUCCESS with output : " + s);
+                         callback.success(outputFilePathAbsolute);
+                     }
+
+                     @Override
+                     public void onProgress(String s) {
+                         Pattern timePattern = Pattern.compile("(?<=time=)[\\d:.]*");
+                         Scanner sc = new Scanner(s);
+
+                         String match = sc.findWithinHorizon(timePattern, 0);
+                         double showProgress = 0.0;
+                         if (match != null) {
+                             String[] matchSplit = match.split(":");
+                             if (totalDur != 0) {
+                                 double progress = (Integer.parseInt(matchSplit[0]) * 3600 +
+                                         Integer.parseInt(matchSplit[1]) * 60 +
+                                         Float.parseFloat(matchSplit[2])) / totalDur;
+                                 showProgress = (progress * 100);
+                             }
+                         }
+
+                         showProgress = Math.floor(showProgress);
+                         showProgress = (int)showProgress;
+                         if (showProgress >= currStatus) {
+                           currStatus = showProgress;
+                         }
+
+                         Log.d(TAG, "=======PROGRESS======== " + currStatus);
+                         JSONObject jsonObj = new JSONObject();
+                         try {
+                             jsonObj.put("progress", currStatus);
+                         } catch (JSONException e) {
+                             e.printStackTrace();
+                         }
+                         PluginResult progressResult = new PluginResult(PluginResult.Status.OK, jsonObj);
+                         progressResult.setKeepCallback(true);
+                         callback.sendPluginResult(progressResult);
+                     }
+
+                     @Override
+                     public void onStart() {
+                         Log.d(TAG, "Started command : ffmpeg " + command);
+                     }
+
+                     @Override
+                     public void onFinish() {
+                         Log.d(TAG, "Finished command : ffmpeg " + command);
+                     }
+                 });
+             } catch (FFmpegCommandAlreadyRunningException e) {
+                 callback.error("ffmpeg try block error");
+             }
+           }
+         });
+       } catch (FFmpegNotSupportedException e) {
+         callback.error("FFmpegNotSupportedException: "+e);
+       } catch (Exception e) {
+         Log.d(TAG, "EXception not supported : " + e);
+         callback.error("EXception not supported : " + e);
+       }
+    }
 
     @SuppressWarnings("deprecation")
     private File resolveLocalFileSystemURI(String url) throws IOException, JSONException {
