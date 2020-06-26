@@ -420,7 +420,7 @@
 
         AVURLAsset *avAsset = [AVURLAsset URLAssetWithURL:inputFileURL options:nil];
 
-        AVAssetExportSession *exportSession = [[AVAssetExportSession alloc]initWithAsset:avAsset presetName: AVAssetExportPresetHighestQuality];
+        AVAssetExportSession *exportSession = [[AVAssetExportSession alloc]initWithAsset:avAsset presetName: AVAssetExportPresetMediumQuality];
         exportSession.outputURL = [NSURL fileURLWithPath:videoOutput];
         exportSession.outputFileType = AVFileTypeQuickTimeMovie;
         exportSession.shouldOptimizeForNetworkUse = YES;
