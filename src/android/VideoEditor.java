@@ -40,11 +40,10 @@ import java.util.Scanner;
 
 import net.ypresto.androidtranscoder.MediaTranscoder;
 
-import com.github.hiteshsondhi88.libffmpeg.ExecuteBinaryResponseHandler;
-import com.github.hiteshsondhi88.libffmpeg.FFmpeg;
-import com.github.hiteshsondhi88.libffmpeg.LoadBinaryResponseHandler;
-import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegCommandAlreadyRunningException;
-import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegNotSupportedException;
+import com.arthenica.mobileffmpeg.Config;
+import com.arthenica.mobileffmpeg.FFmpeg;
+import static com.arthenica.mobileffmpeg.Config.RETURN_CODE_CANCEL;
+import static com.arthenica.mobileffmpeg.Config.RETURN_CODE_SUCCESS;
 
 /**
  * VideoEditor plugin for Android
@@ -574,14 +573,40 @@ public class VideoEditor extends CordovaPlugin {
         final String outputFileExt = this.getFileExt(inputFilePath);
         final String outputFileName = options.optString("outputFileName", new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ENGLISH).format(new Date()));
 
-        // temporary directory
         final Context appContext = cordova.getActivity().getApplicationContext();
-        final File tempDir = this.getTempDir(appContext, outputFileExt);
 
-        // external directory
-        // File moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES);
+        // temporary directory
+        // final File tempDir = this.getTempDir(appContext, outputFileExt);
 
-        File outputFilePath = new File(tempDir, outputFileName + outputFileExt);
+        // external directory -- start
+        final PackageManager pm = appContext.getPackageManager();
+
+        ApplicationInfo ai;
+        try {
+            ai = pm.getApplicationInfo(cordova.getActivity().getPackageName(), 0);
+        } catch (final NameNotFoundException e) {
+            ai = null;
+        }
+        final String appName = (String) (ai != null ? pm.getApplicationLabel(ai) : "Unknown");
+
+        final boolean saveToLibrary = options.optBoolean("saveToLibrary", true);
+        File mediaStorageDir;
+
+        if (saveToLibrary) {
+            mediaStorageDir = new File(Environment.getExternalStorageDirectory(), appName);
+        } else {
+            mediaStorageDir = new File(Environment.getExternalStorageDirectory().getAbsolutePath() + "/Android/data/" + cordova.getActivity().getPackageName() + "/files/files/videos");
+        }
+
+        if (!mediaStorageDir.exists()) {
+            if (!mediaStorageDir.mkdirs()) {
+                callback.error("Can't access or make sportsjig directory");
+                return;
+            }
+        }
+        // external directory -- end
+
+        File outputFilePath = new File(mediaStorageDir.getPath(), outputFileName + outputFileExt);
         final String filePath = outputFilePath.getAbsolutePath();
 
         Log.d(TAG, "startTrim: src: " + inputFilePathAbsolute);
@@ -596,89 +621,44 @@ public class VideoEditor extends CordovaPlugin {
     }
 
      private void execFFmpegBinary(final String[] command, final String outputFilePathAbsolute, final double totalDur) {
-       final Context appContext = cordova.getActivity().getApplicationContext();
-       FFmpeg ffmpeg = FFmpeg.getInstance(appContext);
-
        try {
-         ffmpeg.loadBinary(new LoadBinaryResponseHandler() {
-           @Override
-           public void onFailure() {
-             Log.d(TAG, "ffmpeg : loading failed");
-             callback.error("binary load falied");
-           }
+           Config.enableStatisticsCallback((newStatistics) -> {
+                double currStatus = 0.0;
 
-           @Override
-           public void onSuccess() {
-             Log.d(TAG, "ffmpeg : correct Loaded");
+                double progress = Float.parseFloat(String.valueOf(newStatistics.getTime())) / (totalDur * 1000);
+                double progressFinal = progress * 100;
+                Log.d(TAG, "Video Length: " + progressFinal);
 
-             try {
-                 ffmpeg.execute(command, new ExecuteBinaryResponseHandler() {
-                     double currStatus = 0.0;
+                progressFinal = Math.floor(progressFinal);
+                progressFinal = (int)progressFinal;
+                if (progressFinal >= currStatus) {
+                  currStatus = progressFinal;
+                }
 
-                     @Override
-                     public void onFailure(String s) {
-                         Log.d(TAG, "FAILED with output : " + s);
-                         callback.error(s);
-                     }
+                Log.d(TAG, "=======PROGRESS======== " + currStatus);
+                JSONObject jsonObj = new JSONObject();
+                try {
+                    jsonObj.put("progress", currStatus);
+                } catch (JSONException e) {
+                    e.printStackTrace();
+                }
+                PluginResult progressResult = new PluginResult(PluginResult.Status.OK, jsonObj);
+                progressResult.setKeepCallback(true);
+                callback.sendPluginResult(progressResult);
+           });
 
-                     @Override
-                     public void onSuccess(String s) {
-                         Log.d(TAG, "SUCCESS with output : " + s);
-                         callback.success(outputFilePathAbsolute);
-                     }
-
-                     @Override
-                     public void onProgress(String s) {
-                         Pattern timePattern = Pattern.compile("(?<=time=)[\\d:.]*");
-                         Scanner sc = new Scanner(s);
-
-                         String match = sc.findWithinHorizon(timePattern, 0);
-                         double showProgress = 0.0;
-                         if (match != null) {
-                             String[] matchSplit = match.split(":");
-                             if (totalDur != 0) {
-                                 double progress = (Integer.parseInt(matchSplit[0]) * 3600 +
-                                         Integer.parseInt(matchSplit[1]) * 60 +
-                                         Float.parseFloat(matchSplit[2])) / totalDur;
-                                 showProgress = (progress * 100);
-                             }
-                         }
-
-                         showProgress = Math.floor(showProgress);
-                         showProgress = (int)showProgress;
-                         if (showProgress >= currStatus) {
-                           currStatus = showProgress;
-                         }
-
-                         Log.d(TAG, "=======PROGRESS======== " + currStatus);
-                         JSONObject jsonObj = new JSONObject();
-                         try {
-                             jsonObj.put("progress", currStatus);
-                         } catch (JSONException e) {
-                             e.printStackTrace();
-                         }
-                         PluginResult progressResult = new PluginResult(PluginResult.Status.OK, jsonObj);
-                         progressResult.setKeepCallback(true);
-                         callback.sendPluginResult(progressResult);
-                     }
-
-                     @Override
-                     public void onStart() {
-                         Log.d(TAG, "Started command : ffmpeg " + command);
-                     }
-
-                     @Override
-                     public void onFinish() {
-                         Log.d(TAG, "Finished command : ffmpeg " + command);
-                     }
-                 });
-             } catch (FFmpegCommandAlreadyRunningException e) {
-                 callback.error("ffmpeg try block error");
-             }
-           }
-         });
-       } catch (FFmpegNotSupportedException e) {
-         callback.error("FFmpegNotSupportedException: "+e);
+           FFmpeg.executeAsync(command, (executionId, returnCode) -> {
+               if (returnCode == RETURN_CODE_SUCCESS) {
+                   Log.i(Config.TAG, "Async command execution completed successfully.");
+                   callback.success(outputFilePathAbsolute);
+               } else if (returnCode == RETURN_CODE_CANCEL) {
+                   Log.i(Config.TAG, "Async command execution cancelled by user.");
+                   callback.error(returnCode);
+               } else {
+                   Log.i(Config.TAG, String.format("Async command execution failed with returnCode=%d.", returnCode));
+                   callback.error(returnCode);
+               }
+           });
        } catch (Exception e) {
          Log.d(TAG, "EXception not supported : " + e);
          callback.error("EXception not supported : " + e);
